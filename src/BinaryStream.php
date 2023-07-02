@@ -1,52 +1,36 @@
 <?php
 
-/*
- *
- *  ____            _        _   __  __ _                  __  __ ____
- * |  _ \ ___   ___| | _____| |_|  \/  (_)_ __   ___      |  \/  |  _ \
- * | |_) / _ \ / __| |/ / _ \ __| |\/| | | '_ \ / _ \_____| |\/| | |_) |
- * |  __/ (_) | (__|   <  __/ |_| |  | | | | | |  __/_____| |  | |  __/
- * |_|   \___/ \___|_|\_\___|\__|_|  |_|_|_| |_|\___|     |_|  |_|_|
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * @author PocketMine Team
- * @link http://www.pocketmine.net/
- *
- *
-*/
-
 declare(strict_types=1);
 
 namespace pocketmine\utils;
 
 #include <rules/BinaryIO.h>
 
+use pocketmine\item\Item;
+use InvalidArgumentException;
 use function chr;
 use function ord;
 use function strlen;
 use function substr;
 
 class BinaryStream{
-	//TODO: use typed properties when https://bugs.php.net/bug.php?id=81090 is fixed
 
-	/** @var int */
-	protected $offset;
-	/** @var string */
-	protected $buffer;
-
-	public function __construct(string $buffer = "", int $offset = 0){
-		$this->buffer = $buffer;
-		$this->offset = $offset;
+	public function __construct(
+		public string $buffer = "",
+		public int $offset = 0
+	){
+		//NOOP
 	}
 
 	/**
 	 * Rewinds the stream pointer to the start.
 	 */
 	public function rewind() : void{
+		$this->offset = 0;
+	}
+
+	public function reset() : void{
+		$this->buffer = "";
 		$this->offset = 0;
 	}
 
@@ -58,22 +42,26 @@ class BinaryStream{
 		return $this->offset;
 	}
 
+	public function setBuffer(string $buffer, int $offset = 0) : void{
+		$this->buffer = $buffer;
+		$this->offset = $offset;
+	}
+
 	public function getBuffer() : string{
 		return $this->buffer;
 	}
 
 	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException if there are not enough bytes left in the buffer
+	 * @param int $len
 	 *
-	 * @phpstan-param int<0, max> $len
+	 * @return string
 	 */
 	public function get(int $len) : string{
 		if($len === 0){
 			return "";
 		}
 		if($len < 0){
-			throw new \InvalidArgumentException("Length must be positive");
+			throw new InvalidArgumentException("Length must be positive");
 		}
 
 		$remaining = strlen($this->buffer) - $this->offset;
@@ -85,7 +73,6 @@ class BinaryStream{
 	}
 
 	/**
-	 * @phpstan-impure
 	 * @throws BinaryDataException
 	 */
 	public function getRemaining() : string{
@@ -98,14 +85,19 @@ class BinaryStream{
 		return $str;
 	}
 
+	protected function getString() : string{
+		return $this->get($this->getUnsignedVarInt());
+	}
+
+	protected function putString(string $v){
+		$this->putUnsignedVarInt(strlen($v));
+		$this->put($v);
+	}
+
 	public function put(string $str) : void{
 		$this->buffer .= $str;
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getBool() : bool{
 		return $this->get(1) !== "\x00";
 	}
@@ -114,30 +106,91 @@ class BinaryStream{
 		$this->buffer .= ($v ? "\x01" : "\x00");
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getByte() : int{
 		return ord($this->get(1));
+	}
+
+	public function getUUID() : UUID{
+		//This is actually two little-endian longs: UUID Most followed by UUID Least
+		$part1 = $this->getLInt();
+		$part0 = $this->getLInt();
+		$part3 = $this->getLInt();
+		$part2 = $this->getLInt();
+		return new UUID($part0, $part1, $part2, $part3);
+	}
+
+	public function putUUID(UUID $uuid) : void{
+		$this->putLInt($uuid->getPart(1));
+		$this->putLInt($uuid->getPart(0));
+		$this->putLInt($uuid->getPart(3));
+		$this->putLInt($uuid->getPart(2));
+	}
+
+	public function getSlot() : Item{
+		$id = $this->getVarInt();
+		if($id <= 0){
+			return Item::get(0, 0, 0);
+		}
+
+		$auxValue = $this->getVarInt();
+		$data = $auxValue >> 8;
+		if($data === 0x7fff){
+			$data = -1;
+		}
+		$cnt = $auxValue & 0xff;
+
+		$nbtLen = $this->getLShort();
+		$nbt = "";
+
+		if($nbtLen > 0){
+			$nbt = $this->get($nbtLen);
+		}
+
+		//TODO
+		$canPlaceOn = $this->getVarInt();
+		if($canPlaceOn > 0){
+			for($i = 0; $i < $canPlaceOn; ++$i){
+				$this->getString();
+			}
+		}
+
+		//TODO
+		$canDestroy = $this->getVarInt();
+		if($canDestroy > 0){
+			for($i = 0; $i < $canDestroy; ++$i){
+				$this->getString();
+			}
+		}
+
+		return Item::get($id, $data, $cnt, $nbt);
+	}
+
+	public function putSlot(Item $item) : void{
+		if($item->getId() === 0){
+			$this->putVarInt(0);
+			return;
+		}
+
+		$this->putVarInt($item->getId());
+		$auxValue = (($item->getDamage() & 0x7fff) << 8) | $item->getCount();
+		$this->putVarInt($auxValue);
+
+		$nbt = $item->getCompoundTag();
+		$this->putLShort(strlen($nbt));
+		$this->put($nbt);
+
+		$this->putVarInt(0); //CanPlaceOn entry count (TODO)
+		$this->putVarInt(0); //CanDestroy entry count (TODO)
 	}
 
 	public function putByte(int $v) : void{
 		$this->buffer .= chr($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getShort() : int{
 		return Binary::readShort($this->get(2));
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getSignedShort() : int{
 		return Binary::readSignedShort($this->get(2));
 	}
@@ -146,18 +199,10 @@ class BinaryStream{
 		$this->buffer .= Binary::writeShort($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getLShort() : int{
 		return Binary::readLShort($this->get(2));
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getSignedLShort() : int{
 		return Binary::readSignedLShort($this->get(2));
 	}
@@ -166,10 +211,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeLShort($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getTriad() : int{
 		return Binary::readTriad($this->get(3));
 	}
@@ -178,10 +219,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeTriad($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getLTriad() : int{
 		return Binary::readLTriad($this->get(3));
 	}
@@ -190,10 +227,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeLTriad($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getInt() : int{
 		return Binary::readInt($this->get(4));
 	}
@@ -202,10 +235,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeInt($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getLInt() : int{
 		return Binary::readLInt($this->get(4));
 	}
@@ -214,18 +243,10 @@ class BinaryStream{
 		$this->buffer .= Binary::writeLInt($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getFloat() : float{
 		return Binary::readFloat($this->get(4));
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getRoundedFloat(int $accuracy) : float{
 		return Binary::readRoundedFloat($this->get(4), $accuracy);
 	}
@@ -234,18 +255,10 @@ class BinaryStream{
 		$this->buffer .= Binary::writeFloat($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getLFloat() : float{
 		return Binary::readLFloat($this->get(4));
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getRoundedLFloat(int $accuracy) : float{
 		return Binary::readRoundedLFloat($this->get(4), $accuracy);
 	}
@@ -254,10 +267,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeLFloat($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getDouble() : float{
 		return Binary::readDouble($this->get(8));
 	}
@@ -266,10 +275,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeDouble($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getLDouble() : float{
 		return Binary::readLDouble($this->get(8));
 	}
@@ -278,10 +283,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeLDouble($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getLong() : int{
 		return Binary::readLong($this->get(8));
 	}
@@ -290,10 +291,6 @@ class BinaryStream{
 		$this->buffer .= Binary::writeLong($v);
 	}
 
-	/**
-	 * @phpstan-impure
-	 * @throws BinaryDataException
-	 */
 	public function getLLong() : int{
 		return Binary::readLLong($this->get(8));
 	}
@@ -304,9 +301,6 @@ class BinaryStream{
 
 	/**
 	 * Reads a 32-bit variable-length unsigned integer from the buffer and returns it.
-	 *
-	 * @phpstan-impure
-	 * @throws BinaryDataException
 	 */
 	public function getUnsignedVarInt() : int{
 		return Binary::readUnsignedVarInt($this->buffer, $this->offset);
@@ -314,6 +308,8 @@ class BinaryStream{
 
 	/**
 	 * Writes a 32-bit variable-length unsigned integer to the end of the buffer.
+	 *
+	 * @param int $v
 	 */
 	public function putUnsignedVarInt(int $v) : void{
 		$this->put(Binary::writeUnsignedVarInt($v));
@@ -321,9 +317,6 @@ class BinaryStream{
 
 	/**
 	 * Reads a 32-bit zigzag-encoded variable-length integer from the buffer and returns it.
-	 *
-	 * @phpstan-impure
-	 * @throws BinaryDataException
 	 */
 	public function getVarInt() : int{
 		return Binary::readVarInt($this->buffer, $this->offset);
@@ -331,6 +324,8 @@ class BinaryStream{
 
 	/**
 	 * Writes a 32-bit zigzag-encoded variable-length integer to the end of the buffer.
+	 *
+	 * @param int $v
 	 */
 	public function putVarInt(int $v) : void{
 		$this->put(Binary::writeVarInt($v));
@@ -338,9 +333,6 @@ class BinaryStream{
 
 	/**
 	 * Reads a 64-bit variable-length integer from the buffer and returns it.
-	 *
-	 * @phpstan-impure
-	 * @throws BinaryDataException
 	 */
 	public function getUnsignedVarLong() : int{
 		return Binary::readUnsignedVarLong($this->buffer, $this->offset);
@@ -348,6 +340,8 @@ class BinaryStream{
 
 	/**
 	 * Writes a 64-bit variable-length integer to the end of the buffer.
+	 *
+	 * @param int $v
 	 */
 	public function putUnsignedVarLong(int $v) : void{
 		$this->buffer .= Binary::writeUnsignedVarLong($v);
@@ -355,9 +349,6 @@ class BinaryStream{
 
 	/**
 	 * Reads a 64-bit zigzag-encoded variable-length integer from the buffer and returns it.
-	 *
-	 * @phpstan-impure
-	 * @throws BinaryDataException
 	 */
 	public function getVarLong() : int{
 		return Binary::readVarLong($this->buffer, $this->offset);
@@ -365,6 +356,8 @@ class BinaryStream{
 
 	/**
 	 * Writes a 64-bit zigzag-encoded variable-length integer to the end of the buffer.
+	 *
+	 * @param int $v
 	 */
 	public function putVarLong(int $v) : void{
 		$this->buffer .= Binary::writeVarLong($v);
