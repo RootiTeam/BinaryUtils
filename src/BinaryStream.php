@@ -7,6 +7,7 @@ namespace pocketmine\utils;
 #include <rules/BinaryIO.h>
 
 use pocketmine\item\Item;
+use pocketmine\uuid\UUID;
 use InvalidArgumentException;
 use function chr;
 use function ord;
